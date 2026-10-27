@@ -1,0 +1,4 @@
+registry.json
+__pycache__/
+*.jsonl
+state/
