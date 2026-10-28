@@ -21,11 +21,23 @@ list it in the hub's A2A_HUMAN_SENDERS too).
 from __future__ import annotations
 import json, os, re, urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 HUB = os.getenv("A2A_HUB_HTTP", "http://127.0.0.1:8766")
 BIND = os.getenv("A2A_UI_BIND", "127.0.0.1")
 PORT = int(os.getenv("A2A_UI_PORT", "8767"))
 HUMAN_ID = os.getenv("A2A_UI_HUMAN_ID", "you")
+ROOT = Path(__file__).resolve().parent
+# Same convention as hub.py: the registry the hub serves is a file
+# next to the code unless A2A_REGISTRY says otherwise. Adding an
+# agent writes that file; the hub reads it fresh on every request,
+# so a new agent appears in the rail with no restart anywhere.
+REGISTRY_PATH = Path(os.getenv("A2A_REGISTRY", str(ROOT / "registry.json")))
+
+try:
+    import agent_templates as _templates
+except Exception:  # UI still serves; the add-agent endpoints report why
+    _templates = None
 
 # Optional @aliases: nicknames the operator can type after @, mapped to
 # seat ids — e.g. {"scout": "ollama-scout"}. The socket id stays put.
@@ -66,6 +78,17 @@ body{background:var(--bg);color:var(--txt);font-family:-apple-system,"Segoe UI",
 #gpanel button{flex:1;border:none;border-radius:10px;padding:8px;font-size:13px;font-weight:600;cursor:pointer}
 #gcreate{background:var(--mine);color:#fff}
 #gcancel{background:var(--bubble);color:var(--txt)}
+#newagent{margin:0 12px 10px;background:none;border:1px dashed var(--accent-dim);color:var(--accent);border-radius:14px;padding:7px;font-size:13px;cursor:pointer}
+#newagent:hover{background:var(--panel)}
+#apanel{margin:0 12px 10px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;display:none}
+#apanel h3{font-size:13px;margin-bottom:8px}
+#apanel .adesc{font-size:12px;color:var(--dim);margin:6px 0 2px;line-height:1.4}
+#apanel select,#apanel input{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:10px;color:var(--txt);padding:8px 10px;font-size:13px;outline:none;margin:6px 0}
+#aerror{display:none;color:#ff9d9d;font-size:12px;line-height:1.45;margin:6px 0;white-space:pre-wrap}
+#apanel .row2{display:flex;gap:8px;margin-top:6px}
+#apanel button{flex:1;border:none;border-radius:10px;padding:8px;font-size:13px;font-weight:600;cursor:pointer}
+#acreate{background:var(--mine);color:#fff}
+#acancel{background:var(--bubble);color:var(--txt)}
 #convs{flex:1;overflow-y:auto;padding:2px 8px 12px}
 .conv{display:flex;gap:11px;padding:10px 8px;border-radius:12px;cursor:pointer;align-items:center}
 .conv:hover{background:var(--panel)}
@@ -127,6 +150,16 @@ footer{padding:6px 16px;border-top:1px solid var(--line);font-size:11px;color:va
     <div id="glist"></div>
     <input id="gname" type="text" placeholder="Group name" autocomplete="off">
     <div class="row2"><button id="gcreate">Create</button><button id="gcancel">Cancel</button></div>
+  </div>
+  <button id="newagent">+ Add agent from template</button>
+  <div id="apanel">
+    <h3>Add agent — pick a template</h3>
+    <select id="atemplate"></select>
+    <div class="adesc" id="adesc"></div>
+    <input id="aname" type="text" placeholder="Agent name (blank = template name)" autocomplete="off">
+    <input id="amodel" type="text" placeholder="Model override (blank = template default)" autocomplete="off">
+    <div id="aerror"></div>
+    <div class="row2"><button id="acreate">Add agent</button><button id="acancel">Cancel</button></div>
   </div>
   <div id="convs"><div class="empty">Listening to the mesh…</div></div>
 </aside>
@@ -252,6 +285,42 @@ document.getElementById("delgroup").addEventListener("click",()=>{
   if(!confirm("Delete group thread '"+g.name+"'? (The mesh tape is untouched.)")) return;
   groups=groups.filter(x=>x.gid!==sel.gid); saveGroups();
   selectThread({kind:"room"});
+});
+let templates=[];
+function showTemplateDesc(){
+  const t=templates.find(x=>x.template===document.getElementById("atemplate").value);
+  document.getElementById("adesc").textContent=t?(t.description+(t.model?" · model: "+t.model:"")):"";
+}
+async function loadTemplates(){
+  try{
+    const r=await fetch("/api/templates"); const d=await r.json();
+    templates=d.templates||[];
+    const tsel=document.getElementById("atemplate");
+    tsel.innerHTML=templates.map(t=>'<option value="'+esc(t.template)+'">'+esc(t.title)+"</option>").join("");
+    showTemplateDesc();
+  }catch(e){}
+}
+document.getElementById("atemplate").addEventListener("change",showTemplateDesc);
+document.getElementById("newagent").addEventListener("click",()=>{
+  const p=document.getElementById("apanel");
+  const opening=p.style.display!=="block"; p.style.display=opening?"block":"none";
+  if(opening){ document.getElementById("aerror").style.display="none"; loadTemplates(); }
+});
+document.getElementById("acancel").addEventListener("click",()=>{document.getElementById("apanel").style.display="none";});
+document.getElementById("acreate").addEventListener("click",async()=>{
+  const err=document.getElementById("aerror"); err.style.display="none";
+  const body={template:document.getElementById("atemplate").value,
+              name:document.getElementById("aname").value.trim(),
+              model:document.getElementById("amodel").value.trim()};
+  try{
+    const r=await fetch("/api/agents",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(!d.ok){ err.textContent=(d.errors||["add failed"]).join("\n"); err.style.display="block"; return; }
+    document.getElementById("apanel").style.display="none";
+    document.getElementById("aname").value=""; document.getElementById("amodel").value="";
+    await tick();
+    selectThread({kind:"agent",id:d.agent.id});
+  }catch(e){ err.textContent="Add failed — the UI server could not be reached."; err.style.display="block"; }
 });
 function selectThread(t){
   sel=t;
@@ -407,9 +476,30 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_response(502)
                 self.end_headers()
+        elif self.path == "/api/templates":
+            self._templates_json()
         else:
             self.send_response(404)
             self.end_headers()
+
+    def _json_out(self, code, obj):
+        data = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _templates_json(self):
+        if _templates is None:
+            self._json_out(501, {"ok": False, "errors": ["agent_templates module unavailable"]})
+            return
+        try:
+            rows = _templates.list_templates()
+        except _templates.TemplateError as e:
+            self._json_out(500, {"ok": False, "errors": e.errors, "warnings": e.warnings})
+            return
+        self._json_out(200, {"ok": True, "templates": rows})
 
     def do_POST(self):
         if self.path == "/api/send":
@@ -457,9 +547,43 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 self.send_response(502)
                 self.end_headers()
+        elif self.path == "/api/agents":
+            self._add_agent()
         else:
             self.send_response(404)
             self.end_headers()
+
+    def _add_agent(self):
+        """Add an agent from a template. Validation is loud: a bad
+        spec comes back as a 400 with every problem listed, and
+        nothing is written — no silent dead seats."""
+        if _templates is None:
+            self._json_out(501, {"ok": False, "errors": ["agent_templates module unavailable"]})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(length).decode() or "{}")
+        except Exception:
+            self._json_out(400, {"ok": False, "errors": ["request body must be JSON"]})
+            return
+        template = str(payload.get("template") or "").strip()
+        name = str(payload.get("name") or "").strip() or None
+        model = str(payload.get("model") or "").strip() or None
+        if not template:
+            self._json_out(400, {"ok": False, "errors": ["'template' is required"]})
+            return
+        try:
+            entry, _env, warnings = _templates.add_agent(
+                template, agent_name=name, model_override=model, registry=REGISTRY_PATH
+            )
+        except _templates.TemplateError as e:
+            self._json_out(400, {"ok": False, "errors": e.errors, "warnings": e.warnings})
+            return
+        except Exception as e:
+            self._json_out(500, {"ok": False, "errors": [f"add failed: {e}"]})
+            return
+        public = {k: entry.get(k) for k in ("id", "name", "kind", "lane", "template", "inbox", "model")}
+        self._json_out(200, {"ok": True, "agent": public, "warnings": warnings})
 
 if __name__ == "__main__":
     HTTPServer((BIND, PORT), Handler).serve_forever()

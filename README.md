@@ -46,6 +46,12 @@ processes on your hardware.
   writes wake flags and per-agent latest-message notes for poll-based
   agents; can run an agent's `process_command` on dispatch when the
   registry entry opts in (`auto_process`).
+- **Agent templates** (`templates/` + `agent_templates.py` +
+  `mesh.py`) — one small JSON spec per specialized agent (role,
+  model, tool whitelist, seat settings), seven starters included,
+  and a one-command add that validates loudly, writes the registry
+  entry, and prepares the agent's seat. See "Add your own agent in
+  5 minutes" below.
 - **Thread renderer** (`mesh_thread.py`) — turns the tape into a
   readable markdown transcript, collapsing repeat spam.
 - **Bind helper** (`net_bind.py`) — explicit multi-host binds
@@ -76,6 +82,68 @@ Optional, for agents that poll instead of holding a socket:
 python3 notify_worker.py
 python3 mesh_thread.py
 ```
+
+## Add your own agent in 5 minutes
+
+Agents are added from **templates**: one small JSON file per agent
+in `templates/` — its name, its `role` (the system prompt its seat
+speaks with), its `model` binding, its `tools` whitelist (the tools
+the seat is mandated to use, declared in the spec and carried in
+its registry entry), and its `seat` settings. Seven
+starters ship in the box: `promoter` (drafts-only attention, nothing
+posts without the operator's approval), `researcher`, `coder`
+(sandbox-only, tests to zero flags), `monitor`, `greeter`,
+`documentarian` (docs verified against the real builds), and
+`sarii` (a research seat that routes every suggestion through
+approval). The mesh needs none of them — each is independent, and
+the mesh runs fine with any subset, or none.
+
+**From the CLI:**
+
+```sh
+python3 mesh.py templates                      # see the starters
+python3 mesh.py add-agent promoter --name herald
+```
+
+**From the thread UI:** open the page, click **+ Add agent from
+template**, pick a template, give it a name, Add. Same validation,
+same result.
+
+Either way, adding an agent:
+
+1. **Validates the template, loudly.** A missing role, a model
+   binding with no model, a seat kind the UI cannot render — every
+   problem is listed at once and *nothing is written*. There are no
+   silent dead seats. (Unknown-but-well-formed tool names warn
+   instead of failing; templates carry placeholders only — a
+   real-looking credential in one is an error.)
+2. **Writes the registry entry.** `registry.json` is the source of
+   truth: the hub reads it fresh on every request and the UI builds
+   its rail from it, so the new agent appears in the rail, can be
+   DM'd, and receives dispatched mail in its inbox — no restarts.
+3. **Prepares the seat.** An inbox file is created under
+   `A2A_HOME/inbox/`, and a seat env file under `A2A_HOME/seats/`
+   (including the bus address from your registry, so the seat dials
+   the right mesh). Give it a live chair:
+
+   ```sh
+   set -a; . ~/.a2a-mesh/seats/herald.env; set +a
+   python3 bus_seat.py
+   ```
+
+**Write your own:** copy any file in `templates/`, edit the role,
+model, tools, and settings, keep the file name and the `template`
+field in agreement, and add it the same way:
+
+```sh
+python3 mesh.py validate myagent     # check it before you add it
+python3 mesh.py add-agent myagent --name "My Agent" --model qwen3:8b
+python3 mesh.py remove-agent my-agent   # undo, if you change your mind
+```
+
+`--dry-run` on `add-agent` prints the registry entry it would write
+and changes nothing. Tests for all of this live in `tests/`:
+`python3 -m unittest discover -s tests`.
 
 ## Configuration
 
